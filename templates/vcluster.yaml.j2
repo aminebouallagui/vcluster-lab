@@ -1,0 +1,75 @@
+# ============================================================
+# Fichier généré par Ansible — ne pas modifier à la main
+# vCluster : {{ vc_name }}
+# Demandé  : CPU {{ cpu_request }}→{{ cpu_max }} | RAM {{ ram_request_gi }}→{{ ram_max_gi }}Gi | Stockage {{ storage_gi }}Gi | Pods {{ max_pods }}
+# Stockage de l'état : {{ storage_class }}
+# ============================================================
+
+controlPlane:
+  distro:
+    k8s:
+      enabled: true
+      image:
+        tag: {{ k8s_version }}
+
+{% if cp_replicas | int > 1 %}
+  backingStore:              # HA : etcd embarqué obligatoire
+    etcd:
+      embedded:
+        enabled: true
+
+{% endif %}
+  statefulSet:
+{% if cp_replicas | int > 1 %}
+    highAvailability:
+      replicas: {{ cp_replicas }}
+{% endif %}
+    scheduling:
+      nodeSelector:          # control plane uniquement sur les nœuds désignés
+        vcluster-controlplane: "true"
+    resources:
+      requests:              # la RAM est la ressource critique (écritures disque)
+        cpu: 200m
+        memory: 1Gi
+      limits:                # limite CPU généreuse : évite le throttling
+        cpu: "2"
+        memory: 2Gi
+    persistence:
+      volumeClaim:
+        enabled: true
+        storageClass: {{ storage_class }}
+        size: {{ cp_storage_gi }}Gi
+
+sync:
+  toHost:
+    ingresses:
+      enabled: true               # Ingress du vCluster → recopiés sur l'hôte
+  fromHost:
+    ingressClasses:
+      enabled: true               # IngressClass de l'hôte visibles dans le vCluster
+      selector:
+        matchLabels:              # ... mais SEULEMENT celle des vClusters
+          app.kubernetes.io/instance: ingress-nginx-vcluster
+
+policies:
+  resourceQuota:
+    enabled: true
+    quota:
+      requests.cpu: "{{ quota_requests_cpu }}"
+      limits.cpu: "{{ quota_limits_cpu }}"
+      requests.memory: {{ quota_requests_memory_gi }}Gi
+      limits.memory: {{ quota_limits_memory_gi }}Gi
+      requests.storage: {{ quota_storage_gi }}Gi
+      persistentvolumeclaims: "{{ quota_pvcs }}"
+      count/pods: "{{ quota_pods }}"
+      services.nodeports: "0"
+      services.loadbalancers: "0"
+
+  limitRange:
+    enabled: true
+    default:
+      cpu: 500m
+      memory: 512Mi
+    defaultRequest:
+      cpu: 100m
+      memory: 128Mi

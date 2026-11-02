@@ -1,0 +1,21 @@
+# StorageClass dédiée à l'état des vClusters (dev/test)
+# 1 réplica au lieu de 3 → 3x moins de charge Longhorn
+# PAS de classe par défaut (pas d'annotation is-default-class)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-vcluster
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "1"
+  dataLocality: "best-effort"
+  staleReplicaTimeout: "30"
+  fromBackup: ""
+  fsType: "ext4"
+  unmapMarkSnapChainRemoved: "ignored"
+  disableRevisionCounter: "true"
+  dataEngine: "v1"
+  backupTargetName: "default"

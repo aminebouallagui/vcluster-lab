@@ -1,0 +1,43 @@
+# ============================================================
+# Ingress controller DÉDIÉ aux vClusters
+# Release Helm : ingress-nginx-vcluster  |  Namespace : ingress-nginx-vcluster
+# Ne doit JAMAIS traiter les Ingress de la production (classe "nginx")
+# ============================================================
+controller:
+  # --- Identité : tout doit être DIFFÉRENT de la production ---
+  ingressClass: vcluster                      # classe gérée par ce controller
+  ingressClassResource:
+    enabled: true
+    name: vcluster                            # nom de l'IngressClass créée
+    default: false                            # surtout PAS la classe par défaut
+    controllerValue: k8s.io/ingress-nginx-vcluster   # prod = k8s.io/ingress-nginx
+  electionID: ingress-nginx-vcluster-leader   # élection de leader séparée de la prod
+  watchIngressWithoutClass: false             # ignore les Ingress sans classe
+
+  # --- Sécurité multi-tenant ---
+  allowSnippetAnnotations: false              # interdit l'injection de config nginx par les utilisateurs
+
+  # --- Exposition : ports différents de la prod (30080 / 31868) ---
+  service:
+    type: NodePort
+    nodePorts:
+      http: 30180
+      https: 30543
+
+  # --- Placement : éviter m93p1 / m93p2 (saturés en RAM réelle) ---
+  nodeSelector:
+    vcluster-controlplane: "true"
+
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+  # --- Webhook d'admission DÉSACTIVÉ ---
+  # Un webhook est global : avec 1 seul pod et failurePolicy=Fail, sa panne
+  # bloquerait la création de TOUS les Ingress du cluster (prod comprise).
+  admissionWebhooks:
+    enabled: false

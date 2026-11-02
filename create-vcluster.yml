@@ -1,0 +1,175 @@
+---
+# ============================================================
+# Création interactive d'un vCluster avec quotas
+# Usage : ansible-playbook ~/vcluster-lab/create-vcluster.yml
+# ============================================================
+- name: Créer un vCluster personnalisé
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  # ---------- 1. Les questions ----------
+  vars_prompt:
+    - name: vc_name
+      prompt: "Nom du vCluster (minuscules, chiffres, tirets)"
+      private: false
+
+    - name: env_type
+      prompt: "Type d'environnement (dev = 1 réplica de stockage, prod = 3 réplicas)"
+      default: "dev"
+      private: false
+
+    - name: k8s_version
+      prompt: "Version Kubernetes"
+      default: "v1.30.4"
+      private: false
+
+    - name: cp_replicas
+      prompt: "Nombre de control planes (1 = simple, 3 = haute dispo)"
+      default: "1"
+      private: false
+
+    - name: cpu_request
+      prompt: "CPU garanti pour les applications (cœurs)"
+      default: "1"
+      private: false
+
+    - name: cpu_max
+      prompt: "CPU maximum pour les applications (cœurs)"
+      default: "2"
+      private: false
+
+    - name: ram_request_gi
+      prompt: "RAM garantie pour les applications (Gi)"
+      default: "1"
+      private: false
+
+    - name: ram_max_gi
+      prompt: "RAM maximum pour les applications (Gi)"
+      default: "2"
+      private: false
+
+    - name: storage_gi
+      prompt: "Stockage total pour les applications (Gi)"
+      default: "10"
+      private: false
+
+    - name: max_pods
+      prompt: "Nombre maximum de pods applicatifs"
+      default: "10"
+      private: false
+
+  # ---------- Paramètres fixes du projet ----------
+  vars:
+    vcluster_version: "0.37.4"          # version du chart, fixée pour la reproductibilité
+    vc_namespace: "vcluster-{{ vc_name }}"
+    lab_dir: "{{ lookup('env', 'HOME') }}/vcluster-lab"
+    cp_storage_gi: 5                    # PVC de chaque control plane
+    storage_classes:                    # type d'environnement → StorageClass
+      dev: longhorn-vcluster
+      prod: longhorn
+
+  tasks:
+    # ---------- 2. Validation des réponses ----------
+    - name: Valider les réponses
+      assert:
+        that:
+          - vc_name is match('^[a-z0-9]([a-z0-9-]{0,28}[a-z0-9])?$')
+          - env_type in ['dev', 'prod']
+          - cp_replicas | int in [1, 3]
+          - cpu_request | float > 0
+          - cpu_max | float >= cpu_request | float
+          - ram_request_gi | int >= 1
+          - ram_max_gi | int >= ram_request_gi | int
+          - storage_gi | int >= 1
+          - max_pods | int >= 1
+        fail_msg: >-
+          Réponse invalide. Règles : nom en minuscules/chiffres/tirets (30 car. max),
+          environnement = dev ou prod, control planes = 1 ou 3, max >= garanti,
+          valeurs entières positives pour RAM/stockage/pods.
+        success_msg: "Réponses valides."
+
+    - name: Choisir la StorageClass selon l'environnement
+      set_fact:
+        storage_class: "{{ storage_classes[env_type] }}"
+
+    # ---------- 3. Vérifications de l'existant ----------
+    - name: Vérifier que la StorageClass existe
+      command: kubectl get storageclass {{ storage_class }}
+      changed_when: false
+
+    - name: Vérifier si le namespace existe déjà
+      command: kubectl get namespace {{ vc_namespace }}
+      register: ns_check
+      failed_when: false
+      changed_when: false
+
+    - name: Arrêter si le vCluster existe déjà
+      fail:
+        msg: "Le namespace {{ vc_namespace }} existe déjà. Choisis un autre nom."
+      when: ns_check.rc == 0
+
+    # ---------- 4. Calcul des quotas réels ----------
+    # Part fixe par control plane : requests 500m / 1Gi, limits 2 CPU / 2Gi
+    # Part fixe CoreDNS          : ~0,1 CPU / 1 CPU limit / <1Gi
+    - name: Calculer les quotas (demande + part fixe control plane et CoreDNS)
+      set_fact:
+        quota_requests_cpu: "{{ (cpu_request | float + 0.2 * (cp_replicas | int) + 0.1) | round(1) }}"
+        quota_limits_cpu: "{{ (cpu_max | float + 2 * (cp_replicas | int) + 1) | round(1) }}"
+        quota_requests_memory_gi: "{{ ram_request_gi | int + (cp_replicas | int) + 1 }}"
+        quota_limits_memory_gi: "{{ ram_max_gi | int + 2 * (cp_replicas | int) + 1 }}"
+        quota_storage_gi: "{{ storage_gi | int + cp_storage_gi * (cp_replicas | int) }}"
+        quota_pvcs: "{{ 5 + (cp_replicas | int) }}"
+        quota_pods: "{{ max_pods | int + (cp_replicas | int) + 1 }}"
+
+    # ---------- 5. Génération du fichier ----------
+    - name: Générer le fichier de configuration du vCluster
+      template:
+        src: "{{ lab_dir }}/templates/vcluster.yaml.j2"
+        dest: "{{ lab_dir }}/clusters/{{ vc_name }}.yaml"
+        mode: "0644"
+
+    # ---------- 6. Résumé + confirmation ----------
+    - name: Afficher le résumé
+      debug:
+        msg:
+          - "vCluster        : {{ vc_name }}  (namespace {{ vc_namespace }})"
+          - "Environnement   : {{ env_type }}  →  StorageClass {{ storage_class }}"
+          - "Kubernetes      : {{ k8s_version }}  |  control planes : {{ cp_replicas }}"
+          - "Demandé (apps)  : CPU {{ cpu_request }}→{{ cpu_max }} | RAM {{ ram_request_gi }}→{{ ram_max_gi }}Gi | Stockage {{ storage_gi }}Gi | Pods {{ max_pods }}"
+          - "Quota appliqué  : CPU {{ quota_requests_cpu }}→{{ quota_limits_cpu }} | RAM {{ quota_requests_memory_gi }}→{{ quota_limits_memory_gi }}Gi | Stockage {{ quota_storage_gi }}Gi | Pods {{ quota_pods }}"
+          - "Fichier généré  : {{ lab_dir }}/clusters/{{ vc_name }}.yaml"
+
+    - name: Demander confirmation
+      pause:
+        prompt: "Confirmer la création ? Tape 'oui' pour continuer"
+      register: confirm
+
+    - name: Annuler si non confirmé
+      fail:
+        msg: "Création annulée. Aucun changement sur le cluster."
+      when: confirm.user_input | lower != 'oui'
+
+    # ---------- 7. Création ----------
+    - name: Créer le vCluster
+      command: >-
+        vcluster create {{ vc_name }}
+        --namespace {{ vc_namespace }}
+        --chart-version {{ vcluster_version }}
+        -f {{ lab_dir }}/clusters/{{ vc_name }}.yaml
+        --connect=false
+
+    # ---------- 8. Attente du control plane ----------
+    - name: Attendre que le control plane soit prêt (5 min max)
+      command: kubectl rollout status statefulset/{{ vc_name }} -n {{ vc_namespace }} --timeout=300s
+      changed_when: false
+
+    # ---------- 9. Preuve finale ----------
+    - name: Lire le quota appliqué
+      command: kubectl describe resourcequota -n {{ vc_namespace }}
+      register: quota_out
+      changed_when: false
+
+    - name: Afficher le quota
+      debug:
+        var: quota_out.stdout_lines
